@@ -6,15 +6,28 @@ export interface Article {
   slug: string;
   summary: string | null;
   content: string | null;
-  imageUrl: string | null;
-  category: string;
+  image: string | null;
+  videoUrl: string | null;
+  continent: string | null;
+  country: string | null;
+  category: {
+    id: number;
+    name: string;
+    slug: string;
+    icon: string | null;
+  };
   source: string | null;
   sourceUrl: string | null;
-  publishedAt: string;
+  sourceCount: number;
+  featured: boolean;
+  views: number;
+  publishedAt: string | null;
   createdAt: string;
-  viewCount: number;
-  commentCount: number;
-  avgRating: number | null;
+  updatedAt: string;
+  _count: {
+    comments: number;
+    ratings: number;
+  };
 }
 
 export interface Comment {

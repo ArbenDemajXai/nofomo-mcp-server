@@ -200,7 +200,7 @@ export class NoFOMOClient {
     time?: string;
     limit?: number;
     page?: number;
-  }): Promise<Article[]> {
+  }): Promise<{ articles: Article[]; total: number; page: number; totalPages: number; hasMore: boolean }> {
     const sp = new URLSearchParams();
     if (params?.category) sp.set("category", params.category);
     if (params?.sort) sp.set("sort", params.sort);
@@ -208,7 +208,7 @@ export class NoFOMOClient {
     if (params?.limit) sp.set("limit", String(params.limit));
     if (params?.page) sp.set("page", String(params.page));
     const qs = sp.toString();
-    return this.request<Article[]>(`/api/articles${qs ? `?${qs}` : ""}`);
+    return this.request<{ articles: Article[]; total: number; page: number; totalPages: number; hasMore: boolean }>(`/api/articles${qs ? `?${qs}` : ""}`);
   }
 
   async getArticle(id: number): Promise<Article> {
@@ -236,8 +236,8 @@ export class NoFOMOClient {
 
   // ── Ratings ──
 
-  async getRatings(articleId: number): Promise<Rating[]> {
-    return this.request<Rating[]>(`/api/ratings?articleId=${articleId}`);
+  async getRatings(articleId: number): Promise<{ average: number; count: number; userRating: number | null; userReview: string | null; distribution: Record<string, number> }> {
+    return this.request<{ average: number; count: number; userRating: number | null; userReview: string | null; distribution: Record<string, number> }>(`/api/ratings?articleId=${articleId}`);
   }
 
   async rateArticle(
