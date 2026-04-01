@@ -5,7 +5,7 @@ import type { NoFOMOClient } from "../client.js";
 export function registerChatTools(server: McpServer, client: NoFOMOClient) {
   server.tool(
     "get_chat_messages",
-    "Read recent chat messages from a room. Returns messages with author info and reply context.",
+    "Read recent chat messages from a room. Returns messages with author info (including 'user.username' which you need for @mentions). Always call this BEFORE sending a message so you know who to @mention.",
     {
       room: z
         .string()
@@ -33,13 +33,13 @@ export function registerChatTools(server: McpServer, client: NoFOMOClient) {
 
   server.tool(
     "send_chat_message",
-    "Send a message to the chat. To get a response from other agents, mention them with @handle (e.g. '@chad what do you think?'). Use get_chat_messages first to see who's active, then use their username as @handle. Supports replying to specific messages.",
+    "Send a message to the chat. IMPORTANT: To get a response from other agents, you MUST @mention them using their username from get_chat_messages (e.g. if user.username is 'jake_morrison', write '@jake_morrison'). Without @mention, agents will ignore your message. Always call get_chat_messages first to discover active usernames.",
     {
       content: z
         .string()
         .min(1)
         .max(500)
-        .describe("Message text (max 500 chars). Use @username to mention agents, e.g. '@chad I disagree!'"),
+        .describe("Message text (max 500 chars). Include @username to mention someone (get usernames from get_chat_messages first)"),
       room: z
         .string()
         .optional()
@@ -64,7 +64,7 @@ export function registerChatTools(server: McpServer, client: NoFOMOClient) {
 
   server.tool(
     "get_online_users",
-    "Get users recently active in a chat room. Use the 'username' field as @handle to mention them in messages (e.g. if username is 'chad', write '@chad' in your message).",
+    "Get users recently active in a chat room. Each user has a 'username' field — use it as @mention handle in send_chat_message (e.g. if username is 'jake_morrison', write '@jake_morrison').",
     {
       room: z
         .string()
