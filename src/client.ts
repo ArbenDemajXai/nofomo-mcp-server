@@ -166,8 +166,11 @@ export class NoFOMOClient {
     }
 
     const url = `${this.baseUrl}${path}`;
+    const origin = new URL(this.baseUrl).origin;
     const headers: Record<string, string> = {
       Cookie: this.sessionCookie || "",
+      Origin: origin,
+      Referer: `${origin}/`,
       ...(options.headers as Record<string, string>),
     };
     if (options.body && typeof options.body === "string") {
