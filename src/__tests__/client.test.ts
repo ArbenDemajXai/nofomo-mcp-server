@@ -68,6 +68,7 @@ function mockLoginThenRequest(responseData: unknown, responseStatus = 200) {
 
 describe("NoFOMOClient", () => {
   beforeEach(() => {
+    vi.useRealTimers(); // Safety: reset fake timers if a previous test leaked them
     mockFetch.mockReset();
     mockSocketOn.mockReset();
     mockSocketEmit.mockReset();
@@ -844,6 +845,39 @@ describe("NoFOMOClient", () => {
       await expect(client.getChatMessages()).rejects.toThrow("Login failed");
     });
 
+    it("does not re-register after first registration attempt", async () => {
+      const client = makeClient();
+
+      // 1st request: login fails → register → login succeeds
+      mockFetch
+        .mockResolvedValueOnce(cookieResponse({ csrfToken: "t1" }, "c=t1"))
+        .mockResolvedValueOnce(cookieResponse({}, "", 200))
+        .mockResolvedValueOnce(jsonResponse({}))
+        .mockResolvedValueOnce(jsonResponse({ ok: true }, 201)) // register
+        .mockResolvedValueOnce(cookieResponse({ csrfToken: "t2" }, "c=t2"))
+        .mockResolvedValueOnce(cookieResponse({ url: "/" }, "s=s2", 200))
+        .mockResolvedValueOnce(jsonResponse({ user: { id: "u1" } }))
+        .mockResolvedValueOnce(jsonResponse([])); // actual request
+
+      await client.getChatMessages();
+      const firstCallCount = mockFetch.mock.calls.length;
+
+      // 2nd request: session expires → 401 → re-login (should NOT register again)
+      mockFetch
+        .mockResolvedValueOnce(jsonResponse({ error: "Auth required" }, 401)) // actual request fails
+        .mockResolvedValueOnce(cookieResponse({ csrfToken: "t3" }, "c=t3"))
+        .mockResolvedValueOnce(cookieResponse({ url: "/" }, "s=s3", 200))
+        .mockResolvedValueOnce(jsonResponse({ user: { id: "u1" } }))
+        .mockResolvedValueOnce(jsonResponse([])); // retry
+
+      await client.getChatMessages();
+
+      // Verify no register call in the second round
+      const laterCalls = mockFetch.mock.calls.slice(firstCallCount);
+      const registerCalls = laterCalls.filter((call: any[]) => call[0]?.includes("/api/auth/register"));
+      expect(registerCalls.length).toBe(0);
+    });
+
     it("register sends isBot:true and optional username/image", async () => {
       const client = new NoFOMOClient({
         baseUrl: "https://ad-lux.com/newsv2",
@@ -875,6 +909,507 @@ describe("NoFOMOClient", () => {
       expect(registerBody.username).toBe("mybot");
       expect(registerBody.image).toBe("https://example.com/avatar.png");
       expect(registerBody.name).toBe("MyBot");
+    });
+  });
+
+  // ── Socket.IO Timeout & Reconnect ──
+
+  describe("socket.io timeout and reconnect", () => {
+    function mockLoginForSocket() {
+      mockFetch
+        .mockResolvedValueOnce(cookieResponse({ csrfToken: "tok1" }, "csrf=tok1"))
+        .mockResolvedValueOnce(cookieResponse({ url: "/" }, "next-auth.session-token=sess1", 200))
+        .mockResolvedValueOnce(jsonResponse({ user: { id: "u1", name: "TestAgent" } }));
+    }
+
+    it("can reconnect after disconnect()", async () => {
+      const client = makeClient();
+
+      // First connection
+      mockLoginForSocket();
+      mockSocketOn.mockImplementation((event: string, cb: Function) => {
+        if (event === "connect") setTimeout(() => cb(), 0);
+      });
+      mockSocketConnected = true;
+
+      await client.connect();
+      expect(client.isConnected).toBe(true);
+
+      client.disconnect();
+      expect(client.isConnected).toBe(false);
+
+      // Second connection — should work (socket was nulled)
+      vi.mocked(mockIo).mockClear();
+      mockSocketOn.mockReset();
+      mockSocketOn.mockImplementation((event: string, cb: Function) => {
+        if (event === "connect") setTimeout(() => cb(), 0);
+      });
+
+      // No re-login needed — session cookie still valid
+      await client.connect({ room: "tech" });
+
+      expect(mockIo).toHaveBeenCalledTimes(1);
+      expect(mockSocketEmit).toHaveBeenCalledWith("join-room", "tech");
+    });
+
+    it("connect() authenticates if no session exists", async () => {
+      const client = makeClient();
+      mockLoginForSocket();
+      mockSocketOn.mockImplementation((event: string, cb: Function) => {
+        if (event === "connect") setTimeout(() => cb(), 0);
+      });
+
+      await client.connect();
+
+      // Should have called login (3 fetch calls)
+      expect(mockFetch).toHaveBeenCalledTimes(3);
+    });
+  });
+
+  // ── Cookie Handling ──
+
+  describe("cookie merging", () => {
+    it("mergeCookies deduplicates by key (incoming overrides existing)", async () => {
+      const client = makeClient();
+      mockFetch
+        // csrf
+        .mockResolvedValueOnce(cookieResponse({ csrfToken: "tok1" }, "csrf=old_value; next-auth.session-token=old_sess"))
+        // login — returns new session, overwrites old
+        .mockResolvedValueOnce((() => {
+          const res = new Response(JSON.stringify({ url: "/" }), { status: 200 });
+          res.headers.getSetCookie = () => ["next-auth.session-token=new_sess"];
+          return res;
+        })())
+        // session verify
+        .mockResolvedValueOnce(jsonResponse({ user: { id: "u1" } }))
+        // actual request
+        .mockResolvedValueOnce(jsonResponse([]));
+
+      await client.getChatMessages();
+
+      // Cookie sent to API should have the NEW session token
+      const apiCall = mockFetch.mock.calls[3];
+      const cookie = apiCall[1].headers.Cookie;
+      expect(cookie).toContain("next-auth.session-token=new_sess");
+      expect(cookie).not.toContain("old_sess");
+    });
+  });
+
+  // ── Request Content-Type ──
+
+  describe("request headers", () => {
+    it("sets Content-Type: application/json when body is a string", async () => {
+      const client = makeClient();
+      mockLoginThenRequest({ id: 1, content: "hi" }, 201);
+
+      await client.postComment(10, "hi");
+
+      const opts = mockFetch.mock.calls[3][1];
+      expect(opts.headers["Content-Type"]).toBe("application/json");
+    });
+
+    it("does not set Content-Type on GET requests without body", async () => {
+      const client = makeClient();
+      mockLoginThenRequest([]);
+
+      await client.getChatMessages();
+
+      const opts = mockFetch.mock.calls[3][1];
+      expect(opts.headers["Content-Type"]).toBeUndefined();
+    });
+  });
+
+  // ── Security Boundaries ──
+
+  describe("security boundaries", () => {
+    it("encodes special characters in agent profile username", async () => {
+      const client = makeClient();
+      mockLoginThenRequest({ agent: { id: "a1" }, stats: {} });
+
+      // Username with special chars that could be path traversal
+      await client.getAgentProfile("../admin");
+
+      const url = mockFetch.mock.calls[3][0];
+      expect(url).toContain("/api/agents/..%2Fadmin");
+      expect(url).not.toContain("/../");
+    });
+
+    it("encodes unicode in agent profile username", async () => {
+      const client = makeClient();
+      mockLoginThenRequest({ agent: { id: "a1" }, stats: {} });
+
+      await client.getAgentProfile("tëst_üser");
+
+      const url = mockFetch.mock.calls[3][0];
+      // Should be URL-encoded, not raw unicode in path
+      expect(url).toContain("/api/agents/");
+      expect(url).toContain("t%C3%ABst_%C3%BCser");
+    });
+
+    it("passes long content through without client-side truncation", async () => {
+      const client = makeClient();
+      const longContent = "A".repeat(1000);
+      mockLoginThenRequest({ id: 1, content: longContent }, 201);
+
+      await client.sendChatMessage(longContent);
+
+      const body = JSON.parse(mockFetch.mock.calls[3][1].body);
+      // Client doesn't truncate — that's the server's job (max 500 chars enforced server-side)
+      expect(body.content).toBe(longContent);
+    });
+
+    it("does not leak session cookie in error messages", async () => {
+      const client = makeClient();
+      mockFetch
+        .mockResolvedValueOnce(cookieResponse({ csrfToken: "tok1" }, "csrf=tok1"))
+        .mockResolvedValueOnce(cookieResponse({ url: "/" }, "session=SECRETTOKEN123", 200))
+        .mockResolvedValueOnce(jsonResponse({ user: { id: "u1" } }))
+        .mockResolvedValueOnce(jsonResponse({ error: "Forbidden" }, 403));
+
+      try {
+        await client.getArticles();
+      } catch (e: any) {
+        expect(e.message).not.toContain("SECRETTOKEN123");
+      }
+    });
+
+    it("handles null/undefined room safely in getChatMessages", async () => {
+      const client = makeClient();
+      mockLoginThenRequest([]);
+
+      await client.getChatMessages({ room: undefined, limit: undefined });
+
+      const url = mockFetch.mock.calls[3][0];
+      expect(url).toBe("https://ad-lux.com/newsv2/api/chat");
+    });
+  });
+
+  // ── Error Handling Edge Cases ──
+
+  describe("error handling edge cases", () => {
+    it("includes HTTP status in error message", async () => {
+      const client = makeClient();
+      mockLoginThenRequest({ error: "Rate limited" }, 429);
+
+      await expect(client.sendChatMessage("spam")).rejects.toThrow("429");
+    });
+
+    it("handles server returning non-JSON on error gracefully", async () => {
+      const client = makeClient();
+      mockFetch
+        .mockResolvedValueOnce(cookieResponse({ csrfToken: "t" }, "c=t"))
+        .mockResolvedValueOnce(cookieResponse({ url: "/" }, "s=s", 200))
+        .mockResolvedValueOnce(jsonResponse({ user: { id: "u1" } }))
+        // Server returns HTML error page
+        .mockResolvedValueOnce(new Response("<html>500 Internal Server Error</html>", { status: 500 }));
+
+      await expect(client.getArticles()).rejects.toThrow("HTTP 500");
+    });
+
+    it("handles network fetch failures", async () => {
+      const client = makeClient();
+      mockFetch
+        .mockResolvedValueOnce(cookieResponse({ csrfToken: "t" }, "c=t"))
+        .mockResolvedValueOnce(cookieResponse({ url: "/" }, "s=s", 200))
+        .mockResolvedValueOnce(jsonResponse({ user: { id: "u1" } }))
+        .mockRejectedValueOnce(new Error("fetch failed: ECONNREFUSED"));
+
+      await expect(client.getArticles()).rejects.toThrow("ECONNREFUSED");
+    });
+
+    it("handles CSRF endpoint failure", async () => {
+      const client = makeClient();
+      mockFetch.mockResolvedValueOnce(new Response("", { status: 500 }));
+
+      await expect(client.getChatMessages()).rejects.toThrow();
+    });
+  });
+
+  // ── getArticles edge cases ──
+
+  describe("getArticles edge cases", () => {
+    it("passes time filter parameter", async () => {
+      const client = makeClient();
+      mockLoginThenRequest({ articles: [], total: 0, page: 1, totalPages: 0, hasMore: false });
+
+      await client.getArticles({ time: "24h" });
+
+      const url = mockFetch.mock.calls[3][0];
+      expect(url).toContain("time=24h");
+    });
+
+    it("does not send limit=0 (falsy but valid)", async () => {
+      const client = makeClient();
+      mockLoginThenRequest({ articles: [], total: 0, page: 1, totalPages: 0, hasMore: false });
+
+      // limit=0 is falsy, so the client skips it (by design)
+      await client.getArticles({ limit: 0 });
+
+      const url = mockFetch.mock.calls[3][0];
+      expect(url).not.toContain("limit=");
+    });
+
+    it("handles multiple params combined", async () => {
+      const client = makeClient();
+      mockLoginThenRequest({ articles: [], total: 0, page: 1, totalPages: 0, hasMore: false });
+
+      await client.getArticles({ category: "science", sort: "discussed", time: "7d", limit: 3, page: 2 });
+
+      const url = mockFetch.mock.calls[3][0];
+      expect(url).toContain("category=science");
+      expect(url).toContain("sort=discussed");
+      expect(url).toContain("time=7d");
+      expect(url).toContain("limit=3");
+      expect(url).toContain("page=2");
+    });
+  });
+
+  // ── Socket.IO event edge cases ──
+
+  describe("socket.io event edge cases", () => {
+    function mockLoginForSocket() {
+      mockFetch
+        .mockResolvedValueOnce(cookieResponse({ csrfToken: "tok1" }, "csrf=tok1"))
+        .mockResolvedValueOnce(cookieResponse({ url: "/" }, "next-auth.session-token=sess1", 200))
+        .mockResolvedValueOnce(jsonResponse({ user: { id: "u1", name: "TestAgent" } }));
+    }
+
+    it("does not crash when callbacks are not provided", async () => {
+      const client = makeClient();
+      mockLoginForSocket();
+
+      const handlers = new Map<string, Function>();
+      mockSocketOn.mockImplementation((event: string, cb: Function) => {
+        handlers.set(event, cb);
+        if (event === "connect") setTimeout(() => cb(), 0);
+      });
+
+      // Connect with NO callbacks at all
+      await client.connect({});
+
+      // Fire all events — none should throw
+      handlers.get("chat-message")?.({ id: 1, content: "hi" });
+      handlers.get("online-users")?.([]);
+      handlers.get("chat-error")?.({ message: "err" });
+      handlers.get("chat-delete")?.({ id: 1 });
+      handlers.get("typing")?.({ userId: "u1", username: "test" });
+      handlers.get("disconnect")?.("transport close");
+      // No assertions needed — just verifying no exceptions
+    });
+
+    it("connect_error rejects the connect promise", async () => {
+      const client = makeClient();
+      mockLoginForSocket();
+
+      // Use the proven pattern: fire connect_error via setTimeout
+      mockSocketOn.mockImplementation((event: string, cb: Function) => {
+        if (event === "connect_error") setTimeout(() => cb(new Error("connection refused")), 0);
+      });
+
+      await expect(client.connect()).rejects.toThrow("Socket.IO connection failed: connection refused");
+    });
+
+    it("sendSocketMessage with empty content still emits", async () => {
+      const client = makeClient();
+      mockLoginForSocket();
+
+      mockSocketOn.mockImplementation((event: string, cb: Function) => {
+        if (event === "connect") setTimeout(() => cb(), 0);
+      });
+      mockSocketConnected = true;
+
+      await client.connect();
+      // Empty string is technically valid — server validates
+      client.sendSocketMessage("", "general");
+
+      expect(mockSocketEmit).toHaveBeenCalledWith("chat-message", {
+        content: "",
+        room: "general",
+      });
+    });
+  });
+
+  // ── getOnlineUsers edge cases ──
+
+  describe("getOnlineUsers edge cases", () => {
+    it("handles messages with missing user fields gracefully", async () => {
+      const client = makeClient();
+      const messages = [
+        { id: 1, content: "hi", room: "general", userId: "u1", user: { name: "Alice", username: null, isBot: false }, replyToId: null, createdAt: "", replyTo: null },
+      ];
+      mockLoginThenRequest(messages);
+
+      const users = await client.getOnlineUsers();
+      expect(users).toHaveLength(1);
+      expect(users[0].username).toBeNull();
+    });
+
+    it("preserves first-seen user when duplicate userIds appear", async () => {
+      const client = makeClient();
+      const messages = [
+        { id: 1, content: "first", room: "general", userId: "u1", user: { name: "Alice v1", username: "alice", isBot: false }, replyToId: null, createdAt: "", replyTo: null },
+        { id: 2, content: "second", room: "general", userId: "u1", user: { name: "Alice v2", username: "alice_new", isBot: false }, replyToId: null, createdAt: "", replyTo: null },
+      ];
+      mockLoginThenRequest(messages);
+
+      const users = await client.getOnlineUsers();
+      expect(users).toHaveLength(1);
+      // First occurrence wins
+      expect(users[0].name).toBe("Alice v1");
+    });
+  });
+
+  // ── Dual-mode sendChatMessage edge cases ──
+
+  describe("dual-mode sendChatMessage", () => {
+    function mockLoginForSocket() {
+      mockFetch
+        .mockResolvedValueOnce(cookieResponse({ csrfToken: "tok1" }, "csrf=tok1"))
+        .mockResolvedValueOnce(cookieResponse({ url: "/" }, "next-auth.session-token=sess1", 200))
+        .mockResolvedValueOnce(jsonResponse({ user: { id: "u1", name: "TestAgent" } }));
+    }
+
+    it("via socket: user.image reflects client config", async () => {
+      const client = new NoFOMOClient({
+        baseUrl: "https://ad-lux.com/newsv2",
+        email: "test@nofomo.dev",
+        password: "TestPass123!",
+        name: "TestAgent",
+        username: "testagent",
+        image: "https://example.com/avatar.png",
+      });
+
+      mockLoginForSocket();
+      mockSocketOn.mockImplementation((event: string, cb: Function) => {
+        if (event === "connect") setTimeout(() => cb(), 0);
+      });
+      mockSocketConnected = true;
+
+      await client.connect();
+      const result = await client.sendChatMessage("hello");
+
+      expect(result.user.image).toBe("https://example.com/avatar.png");
+    });
+
+    it("via socket: user.image is null when not configured", async () => {
+      const client = makeClient();
+      mockLoginForSocket();
+      mockSocketOn.mockImplementation((event: string, cb: Function) => {
+        if (event === "connect") setTimeout(() => cb(), 0);
+      });
+      mockSocketConnected = true;
+
+      await client.connect();
+      const result = await client.sendChatMessage("hello");
+
+      expect(result.user.image).toBeNull();
+    });
+
+    it("via socket: returns id=0 (placeholder) and valid ISO timestamp", async () => {
+      const client = makeClient();
+      mockLoginForSocket();
+      mockSocketOn.mockImplementation((event: string, cb: Function) => {
+        if (event === "connect") setTimeout(() => cb(), 0);
+      });
+      mockSocketConnected = true;
+
+      await client.connect();
+      const before = new Date().toISOString();
+      const result = await client.sendChatMessage("test");
+      const after = new Date().toISOString();
+
+      expect(result.id).toBe(0);
+      expect(result.createdAt >= before).toBe(true);
+      expect(result.createdAt <= after).toBe(true);
+    });
+
+    it("HTTP fallback after socket disconnects mid-session", async () => {
+      const client = makeClient();
+      mockLoginForSocket();
+      mockSocketOn.mockImplementation((event: string, cb: Function) => {
+        if (event === "connect") setTimeout(() => cb(), 0);
+      });
+      mockSocketConnected = true;
+
+      await client.connect();
+
+      // Socket disconnects unexpectedly
+      mockSocketConnected = false;
+      client.disconnect();
+
+      // Now sendChatMessage should fall back to HTTP
+      mockFetch.mockResolvedValueOnce(jsonResponse({ id: 99, content: "via http", room: "general" }, 201));
+
+      const result = await client.sendChatMessage("via http");
+      expect(result.id).toBe(99);
+      expect(result.content).toBe("via http");
+    });
+  });
+
+  // ── Rate limiting resilience ──
+
+  describe("rate limiting", () => {
+    it("surfaces 429 errors clearly", async () => {
+      const client = makeClient();
+      mockFetch
+        .mockResolvedValueOnce(cookieResponse({ csrfToken: "t" }, "c=t"))
+        .mockResolvedValueOnce(cookieResponse({ url: "/" }, "s=s", 200))
+        .mockResolvedValueOnce(jsonResponse({ user: { id: "u1" } }))
+        .mockResolvedValueOnce(new Response(JSON.stringify({ error: "Too many requests" }), { status: 429 }));
+
+      try {
+        await client.sendChatMessage("spam");
+        expect(true).toBe(false); // should not reach
+      } catch (e: any) {
+        expect(e.message).toContain("429");
+      }
+    });
+
+    it("does not retry on 429 (no infinite loop)", async () => {
+      const client = makeClient();
+      mockFetch
+        .mockResolvedValueOnce(cookieResponse({ csrfToken: "t" }, "c=t"))
+        .mockResolvedValueOnce(cookieResponse({ url: "/" }, "s=s", 200))
+        .mockResolvedValueOnce(jsonResponse({ user: { id: "u1" } }))
+        .mockResolvedValueOnce(new Response("Rate limited", { status: 429 }));
+
+      await expect(client.sendChatMessage("test")).rejects.toThrow();
+      // Only 4 calls — no retry loop
+      expect(mockFetch).toHaveBeenCalledTimes(4);
+    });
+  });
+
+  // ── Constructor validation ──
+
+  describe("constructor edge cases", () => {
+    it("handles baseUrl with multiple path segments", async () => {
+      const client = makeClient({ baseUrl: "https://cdn.example.com/app/v2/newsv2" });
+      mockLoginThenRequest([]);
+
+      await client.getChatMessages();
+
+      const url = mockFetch.mock.calls[3][0];
+      expect(url).toBe("https://cdn.example.com/app/v2/newsv2/api/chat");
+    });
+
+    it("derives correct socket.io path from deep baseUrl", async () => {
+      const client = makeClient({ baseUrl: "https://example.com/app/newsv2" });
+      mockFetch
+        .mockResolvedValueOnce(cookieResponse({ csrfToken: "t" }, "c=t"))
+        .mockResolvedValueOnce(cookieResponse({ url: "/" }, "s=sess", 200))
+        .mockResolvedValueOnce(jsonResponse({ user: { id: "u1", name: "Test" } }));
+
+      mockSocketOn.mockImplementation((event: string, cb: Function) => {
+        if (event === "connect") setTimeout(() => cb(), 0);
+      });
+
+      await client.connect();
+
+      expect(mockIo).toHaveBeenCalledWith("https://example.com", {
+        path: "/app/newsv2/socket.io",
+        transports: ["websocket", "polling"],
+        extraHeaders: expect.any(Object),
+      });
     });
   });
 });
