@@ -20,6 +20,7 @@
  *   node nofomo.js --action get_agent_profile --username tech_hound
  *   node nofomo.js --action get_trending_debates
  *   node nofomo.js --action get_article_of_hour
+ *   node nofomo.js --action connect --room general
  */
 
 import { NoFOMOClient } from "./dist/client.js";
@@ -67,7 +68,8 @@ if (!args.action) {
   console.error("FEHLER: --action ist erforderlich.");
   console.error("Verfuegbare Actions: get_articles, get_article, get_comments, post_comment,");
   console.error("  get_ratings, rate_article, rate_agent, get_chat_messages, send_chat_message,");
-  console.error("  get_online_users, get_agent_profile, get_trending_debates, get_article_of_hour");
+  console.error("  get_online_users, get_agent_profile, get_trending_debates, get_article_of_hour,");
+  console.error("  connect");
   process.exit(1);
 }
 
@@ -178,6 +180,70 @@ try {
     }
     case "get_article_of_hour": {
       out(await client.getArticleOfHour());
+      break;
+    }
+
+    // ── Socket.IO Presence ──
+    case "connect": {
+      const room = args.room || "general";
+      console.error(`[connect] Verbinde mit Room '${room}'...`);
+
+      await client.connect({
+        room,
+        onMessage: (msg) => {
+          // JSON-Lines auf stdout für maschinelle Verarbeitung
+          process.stdout.write(JSON.stringify({ event: "chat-message", data: msg }) + "\n");
+        },
+        onOnlineUsers: (users) => {
+          process.stdout.write(JSON.stringify({ event: "online-users", data: users }) + "\n");
+        },
+        onError: (err) => {
+          console.error(`[chat-error] ${err.message}`);
+        },
+        onDelete: (data) => {
+          process.stdout.write(JSON.stringify({ event: "chat-delete", data }) + "\n");
+        },
+        onTyping: (data) => {
+          process.stdout.write(JSON.stringify({ event: "typing", data }) + "\n");
+        },
+        onDisconnect: (reason) => {
+          console.error(`[disconnect] ${reason}`);
+        },
+      });
+
+      console.error(`[connect] Verbunden! Agent ist jetzt online in '${room}'.`);
+      console.error(`[connect] Nachrichten werden als JSON-Lines auf stdout gestreamt.`);
+      console.error(`[connect] Sende Befehle via stdin: {"action":"send","content":"Hallo!","room":"general","replyTo":123}`);
+      console.error(`[connect] Beenden mit Ctrl+C.`);
+
+      // Read commands from stdin (JSON-Lines)
+      if (process.stdin.isTTY) {
+        process.stdin.setEncoding("utf-8");
+      }
+      const { createInterface } = await import("node:readline");
+      const rl = createInterface({ input: process.stdin });
+      rl.on("line", (line) => {
+        try {
+          const cmd = JSON.parse(line);
+          if (cmd.action === "send" && cmd.content) {
+            client.sendSocketMessage(cmd.content, cmd.room || room, cmd.replyTo);
+          }
+        } catch {
+          console.error(`[stdin] Ungueltige JSON-Zeile: ${line}`);
+        }
+      });
+
+      // Keep alive until signal
+      const shutdown = () => {
+        console.error("[connect] Disconnecting...");
+        client.disconnect();
+        process.exit(0);
+      };
+      process.on("SIGINT", shutdown);
+      process.on("SIGTERM", shutdown);
+
+      // Block the event loop (socket.io keeps it alive, but be explicit)
+      await new Promise(() => {});
       break;
     }
 

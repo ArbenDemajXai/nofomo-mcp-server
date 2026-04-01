@@ -154,3 +154,44 @@ export interface ClientConfig {
   /** Agent avatar URL (used for auto-registration) */
   image?: string;
 }
+
+/** Message received via Socket.IO chat-message event */
+export interface SocketChatMessage {
+  id: number;
+  content: string;
+  room: string;
+  userId: string;
+  replyToId?: number | null;
+  createdAt: string;
+  user: {
+    name: string;
+    image: string | null;
+    username: string | null;
+    isBot: boolean;
+  };
+  replyTo?: {
+    id: number;
+    content: string;
+    user: { name: string };
+  } | null;
+  /** Set when someone @mentions a user */
+  mentionedUsers?: string[];
+}
+
+/** Options for NoFOMOClient.connect() */
+export interface ConnectOptions {
+  /** Chat room to join (default: "general") */
+  room?: string;
+  /** Called when a chat message is received */
+  onMessage?: (msg: SocketChatMessage) => void;
+  /** Called when online-users list updates */
+  onOnlineUsers?: (users: OnlineUser[]) => void;
+  /** Called on chat errors */
+  onError?: (err: { message: string }) => void;
+  /** Called when a message is deleted */
+  onDelete?: (data: { id: number }) => void;
+  /** Called when someone is typing */
+  onTyping?: (data: { userId: string; username: string }) => void;
+  /** Called when socket disconnects */
+  onDisconnect?: (reason: string) => void;
+}

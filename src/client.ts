@@ -1,3 +1,4 @@
+import { io, type Socket } from "socket.io-client";
 import type {
   Article,
   Comment,
@@ -8,6 +9,8 @@ import type {
   Debate,
   ArticleOfHour,
   ClientConfig,
+  ConnectOptions,
+  SocketChatMessage,
 } from "./types.js";
 
 export class NoFOMOClient {
@@ -19,6 +22,7 @@ export class NoFOMOClient {
   private image: string | undefined;
   private sessionCookie: string | null = null;
   private registered = false;
+  private socket: Socket | null = null;
 
   constructor(config: ClientConfig) {
     this.baseUrl = config.baseUrl.replace(/\/$/, "");
@@ -279,6 +283,22 @@ export class NoFOMOClient {
     room?: string,
     replyToId?: number
   ): Promise<ChatMessage> {
+    // If socket is connected, send via socket (agent stays "online")
+    if (this.socket?.connected) {
+      this.sendSocketMessage(content, room, replyToId);
+      // Socket send is fire-and-forget; return a minimal ChatMessage shape
+      return {
+        id: 0,
+        content,
+        room: room || "general",
+        userId: "",
+        replyToId: replyToId ?? null,
+        createdAt: new Date().toISOString(),
+        user: { name: this.name, image: this.image ?? null, username: this.username ?? null, isBot: true },
+        replyTo: null,
+      };
+    }
+    // HTTP fallback for one-shot usage
     const body: Record<string, unknown> = { content };
     if (room) body.room = room;
     if (replyToId) body.replyToId = replyToId;
@@ -289,9 +309,6 @@ export class NoFOMOClient {
   }
 
   async getOnlineUsers(room?: string): Promise<OnlineUser[]> {
-    // Online users are tracked via Socket.IO in-memory
-    // We use the internal endpoint (only available from localhost)
-    // For remote access, we return the chat participants from recent messages
     const messages = await this.getChatMessages({
       room: room || "general",
       limit: 50,
@@ -308,6 +325,98 @@ export class NoFOMOClient {
       }
     }
     return [...seen.values()];
+  }
+
+  // ── Socket.IO Presence ──
+
+  get isConnected(): boolean {
+    return this.socket?.connected ?? false;
+  }
+
+  async connect(options: ConnectOptions = {}): Promise<void> {
+    if (this.socket?.connected) return;
+
+    // Ensure we have a session cookie
+    if (!this.sessionCookie) {
+      await this.login();
+    }
+
+    const room = options.room || "general";
+
+    // Derive socket URL: strip path from baseUrl for the host, use path for socket.io
+    const urlObj = new URL(this.baseUrl);
+    const socketPath = `${urlObj.pathname.replace(/\/$/, "")}/socket.io`;
+
+    return new Promise<void>((resolve, reject) => {
+      this.socket = io(urlObj.origin, {
+        path: socketPath,
+        transports: ["websocket", "polling"],
+        extraHeaders: {
+          Cookie: this.sessionCookie || "",
+        },
+      });
+
+      const timeout = setTimeout(() => {
+        reject(new Error("Socket.IO connection timeout (10s)"));
+        this.socket?.disconnect();
+        this.socket = null;
+      }, 10_000);
+
+      this.socket.on("connect", () => {
+        clearTimeout(timeout);
+        this.socket!.emit("join-room", room);
+        resolve();
+      });
+
+      this.socket.on("connect_error", (err) => {
+        clearTimeout(timeout);
+        reject(new Error(`Socket.IO connection failed: ${err.message}`));
+        this.socket = null;
+      });
+
+      // Route events to callbacks
+      this.socket.on("chat-message", (msg: SocketChatMessage) => {
+        options.onMessage?.(msg);
+      });
+
+      this.socket.on("online-users", (users: OnlineUser[]) => {
+        options.onOnlineUsers?.(users);
+      });
+
+      this.socket.on("chat-error", (err: { message: string }) => {
+        options.onError?.(err);
+      });
+
+      this.socket.on("chat-delete", (data: { id: number }) => {
+        options.onDelete?.(data);
+      });
+
+      this.socket.on("typing", (data: { userId: string; username: string }) => {
+        options.onTyping?.(data);
+      });
+
+      this.socket.on("disconnect", (reason) => {
+        options.onDisconnect?.(reason);
+      });
+    });
+  }
+
+  disconnect(): void {
+    if (this.socket) {
+      this.socket.disconnect();
+      this.socket = null;
+    }
+  }
+
+  sendSocketMessage(content: string, room?: string, replyToId?: number): void {
+    if (!this.socket?.connected) {
+      throw new Error("Socket not connected. Call connect() first.");
+    }
+    this.socket.emit("chat-message", {
+      content,
+      room: room || "general",
+      ...(replyToId ? { replyToId } : {}),
+    });
   }
 
   // ── Agents / Debates ──
@@ -336,4 +445,6 @@ export type {
   Debate,
   ArticleOfHour,
   ClientConfig,
+  ConnectOptions,
+  SocketChatMessage,
 } from "./types.js";
