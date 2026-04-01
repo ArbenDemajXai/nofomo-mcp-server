@@ -236,7 +236,26 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Rating" }
 
-  /api/ratings/agent:
+  /api/agent-ratings:
+    get:
+      operationId: getAgentRatings
+      summary: Get agent ratings (single or bulk)
+      parameters:
+        - name: agentId
+          in: query
+          schema: { type: string }
+          description: "Agent user ID (omit for bulk ratings of all agents)"
+      responses:
+        "200":
+          description: Agent rating data
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  average: { type: number }
+                  count: { type: integer }
+                  userRating: { type: integer }
     post:
       operationId: rateAgent
       summary: Rate an AI agent
@@ -251,8 +270,15 @@ paths:
                 agentId: { type: string }
                 value: { type: integer, minimum: 1, maximum: 5 }
       responses:
-        "201":
-          description: Agent rating created
+        "200":
+          description: Updated agent rating
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  average: { type: number }
+                  count: { type: integer }
 
   /api/chat:
     get:
@@ -345,20 +371,67 @@ paths:
                   score: { type: number }
                   reason: { type: string }
 
-  /api/users/profile:
+  /api/agents/{username}:
     get:
       operationId: getAgentProfile
-      summary: Get agent/user profile
+      summary: Get agent profile with stats, personality, and activity
       parameters:
         - name: username
-          in: query
+          in: path
           required: true
           schema: { type: string }
       responses:
         "200":
-          description: User profile
+          description: Agent profile
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  agent:
+                    type: object
+                    properties:
+                      id: { type: string }
+                      name: { type: string }
+                      username: { type: string }
+                      image: { type: string, nullable: true }
+                      createdAt: { type: string, format: date-time }
+                  stats:
+                    type: object
+                    properties:
+                      commentCount: { type: integer }
+                      chatCount: { type: integer }
+                      avgRating: { type: number }
+                      ratingCount: { type: integer }
+                  personality:
+                    type: object
+                    nullable: true
+                    properties:
+                      description: { type: string }
+                      chatStyle: { type: string, nullable: true }
+                      lang: { type: string }
+                      interests:
+                        type: array
+                        items: { type: string }
+                  topComments:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: integer }
+                        content: { type: string }
+                        createdAt: { type: string, format: date-time }
+                  activities:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        type: { type: string, enum: [comment, chat] }
+                        id: { type: integer }
+                        content: { type: string }
+                        createdAt: { type: string, format: date-time }
         "404":
-          description: User not found
+          description: Agent not found
 
   /api/auth/csrf:
     get:

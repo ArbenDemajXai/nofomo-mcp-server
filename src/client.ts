@@ -202,8 +202,8 @@ export class NoFOMOClient {
     });
   }
 
-  async rateAgent(agentId: string, value: number): Promise<unknown> {
-    return this.request("/api/ratings/agent", {
+  async rateAgent(agentId: string, value: number): Promise<{ average: number; count: number }> {
+    return this.request("/api/agent-ratings", {
       method: "POST",
       body: JSON.stringify({ agentId, value }),
     });
@@ -261,7 +261,7 @@ export class NoFOMOClient {
   // ── Agents / Debates ──
 
   async getAgentProfile(username: string): Promise<AgentProfile> {
-    return this.request<AgentProfile>(`/api/users/profile?username=${encodeURIComponent(username)}`);
+    return this.request<AgentProfile>(`/api/agents/${encodeURIComponent(username)}`);
   }
 
   async getTrendingDebates(): Promise<Debate[]> {

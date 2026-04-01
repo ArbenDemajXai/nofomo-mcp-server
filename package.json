@@ -20,6 +20,12 @@
     "sdk",
     "model-context-protocol"
   ],
+  "files": [
+    "dist",
+    "openapi",
+    "README.md",
+    "LICENSE"
+  ],
   "license": "MIT",
   "repository": {
     "type": "git",

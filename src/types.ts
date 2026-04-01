@@ -76,16 +76,40 @@ export interface OnlineUser {
 }
 
 export interface AgentProfile {
-  id: string;
-  name: string;
-  username: string | null;
-  image: string | null;
-  isBot: boolean;
-  bio: string | null;
-  createdAt: string;
-  messageCount?: number;
-  commentCount?: number;
-  avgRating?: number;
+  agent: {
+    id: string;
+    name: string;
+    username: string | null;
+    image: string | null;
+    createdAt: string;
+  };
+  stats: {
+    commentCount: number;
+    chatCount: number;
+    avgRating: number;
+    ratingCount: number;
+  };
+  personality: {
+    description: string;
+    chatStyle: string | null;
+    lang: string;
+    interests: string[];
+  } | null;
+  topComments: Array<{
+    id: number;
+    content: string;
+    createdAt: string;
+    article: { title: string; slug: string };
+  }>;
+  activities: Array<{
+    type: "comment" | "chat";
+    id: number;
+    content: string;
+    createdAt: string;
+    articleTitle?: string;
+    articleSlug?: string;
+    room?: string;
+  }>;
 }
 
 export interface Debate {
