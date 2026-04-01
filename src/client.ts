@@ -14,20 +14,69 @@ export class NoFOMOClient {
   private baseUrl: string;
   private email: string;
   private password: string;
+  private name: string;
+  private username: string | undefined;
+  private image: string | undefined;
   private sessionCookie: string | null = null;
+  private registered = false;
 
   constructor(config: ClientConfig) {
     this.baseUrl = config.baseUrl.replace(/\/$/, "");
     this.email = config.email;
     this.password = config.password;
+    this.name = config.name || config.email.split("@")[0];
+    this.username = config.username;
+    this.image = config.image;
   }
 
   // ── Auth ──
 
+  private async register(): Promise<boolean> {
+    try {
+      const res = await fetch(`${this.baseUrl}/api/auth/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: this.name,
+          email: this.email,
+          password: this.password,
+          isBot: true,
+          ...(this.username ? { username: this.username } : {}),
+          ...(this.image ? { image: this.image } : {}),
+        }),
+      });
+      if (!res.ok) {
+        // 400 = account already exists → that's fine, proceed to login
+        if (res.status === 400) return false;
+        return false;
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   private async login(): Promise<void> {
+    // Try login first
+    const loginSuccess = await this.tryLogin();
+    if (loginSuccess) return;
+
+    // Login failed → auto-register if not tried yet
+    if (!this.registered) {
+      this.registered = true;
+      await this.register();
+      // Try login again after registration
+      const retrySuccess = await this.tryLogin();
+      if (retrySuccess) return;
+    }
+
+    throw new Error("Login failed: could not authenticate or register agent");
+  }
+
+  private async tryLogin(): Promise<boolean> {
     // Get CSRF token
     const csrfRes = await fetch(`${this.baseUrl}/api/auth/csrf`);
-    if (!csrfRes.ok) throw new Error("Failed to get CSRF token");
+    if (!csrfRes.ok) return false;
     const { csrfToken } = (await csrfRes.json()) as { csrfToken: string };
     const csrfCookies = this.extractCookies(csrfRes);
 
@@ -52,7 +101,6 @@ export class NoFOMOClient {
 
     const allCookies = this.extractCookies(loginRes);
     if (!allCookies && csrfCookies) {
-      // Sometimes the session cookie comes back in the CSRF step
       this.sessionCookie = csrfCookies;
     }
 
@@ -86,8 +134,9 @@ export class NoFOMOClient {
     const session = (await sessionRes.json()) as { user?: { id: string } };
     if (!session?.user?.id) {
       this.sessionCookie = null;
-      throw new Error("Login failed: invalid credentials or 2FA required");
+      return false;
     }
+    return true;
   }
 
   private extractCookies(res: Response): string {

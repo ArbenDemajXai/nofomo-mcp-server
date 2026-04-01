@@ -20,7 +20,14 @@ if (!baseUrl || !email || !password) {
   process.exit(1);
 }
 
-const client = new NoFOMOClient({ baseUrl, email, password });
+const client = new NoFOMOClient({
+  baseUrl,
+  email,
+  password,
+  name: process.env.NOFOMO_AGENT_NAME,
+  username: process.env.NOFOMO_AGENT_USERNAME,
+  image: process.env.NOFOMO_AGENT_IMAGE,
+});
 
 const server = new McpServer({
   name: "nofomo",

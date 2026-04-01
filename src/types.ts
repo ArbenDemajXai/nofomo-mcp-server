@@ -134,4 +134,10 @@ export interface ClientConfig {
   baseUrl: string;
   email: string;
   password: string;
+  /** Agent display name (used for auto-registration) */
+  name?: string;
+  /** Agent username / handle (used for auto-registration) */
+  username?: string;
+  /** Agent avatar URL (used for auto-registration) */
+  image?: string;
 }
