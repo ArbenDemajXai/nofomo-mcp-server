@@ -452,5 +452,429 @@ describe("NoFOMOClient", () => {
       // Should use HTTP (4 calls: login + request)
       expect(mockFetch).toHaveBeenCalledTimes(4);
     });
+
+    it("connect() is idempotent when already connected", async () => {
+      const client = makeClient();
+      mockLoginForSocket();
+
+      mockSocketOn.mockImplementation((event: string, cb: Function) => {
+        if (event === "connect") setTimeout(() => cb(), 0);
+      });
+      mockSocketConnected = true;
+
+      await client.connect();
+      // Second connect should return immediately without creating a new socket
+      await client.connect();
+
+      // io() should only be called once
+      expect(mockIo).toHaveBeenCalledTimes(1);
+    });
+
+    it("disconnect() is safe to call when not connected", () => {
+      const client = makeClient();
+      // Should not throw
+      client.disconnect();
+      expect(client.isConnected).toBe(false);
+    });
+
+    it("disconnect() is safe to call multiple times", async () => {
+      const client = makeClient();
+      mockLoginForSocket();
+
+      mockSocketOn.mockImplementation((event: string, cb: Function) => {
+        if (event === "connect") setTimeout(() => cb(), 0);
+      });
+
+      await client.connect();
+      client.disconnect();
+      client.disconnect(); // second call should not throw
+
+      expect(mockSocketDisconnect).toHaveBeenCalledTimes(1);
+    });
+
+    it("routes chat-error events to onError callback", async () => {
+      const client = makeClient();
+      mockLoginForSocket();
+
+      const errors: unknown[] = [];
+      const handlers = new Map<string, Function>();
+      mockSocketOn.mockImplementation((event: string, cb: Function) => {
+        handlers.set(event, cb);
+        if (event === "connect") setTimeout(() => cb(), 0);
+      });
+
+      await client.connect({ onError: (err) => errors.push(err) });
+
+      handlers.get("chat-error")!({ message: "Rate limited" });
+      expect(errors).toEqual([{ message: "Rate limited" }]);
+    });
+
+    it("routes chat-delete events to onDelete callback", async () => {
+      const client = makeClient();
+      mockLoginForSocket();
+
+      const deletes: unknown[] = [];
+      const handlers = new Map<string, Function>();
+      mockSocketOn.mockImplementation((event: string, cb: Function) => {
+        handlers.set(event, cb);
+        if (event === "connect") setTimeout(() => cb(), 0);
+      });
+
+      await client.connect({ onDelete: (data) => deletes.push(data) });
+
+      handlers.get("chat-delete")!({ id: 42 });
+      expect(deletes).toEqual([{ id: 42 }]);
+    });
+
+    it("routes typing events to onTyping callback", async () => {
+      const client = makeClient();
+      mockLoginForSocket();
+
+      const typings: unknown[] = [];
+      const handlers = new Map<string, Function>();
+      mockSocketOn.mockImplementation((event: string, cb: Function) => {
+        handlers.set(event, cb);
+        if (event === "connect") setTimeout(() => cb(), 0);
+      });
+
+      await client.connect({ onTyping: (data) => typings.push(data) });
+
+      handlers.get("typing")!({ userId: "u1", username: "chad" });
+      expect(typings).toEqual([{ userId: "u1", username: "chad" }]);
+    });
+
+    it("routes disconnect events to onDisconnect callback", async () => {
+      const client = makeClient();
+      mockLoginForSocket();
+
+      const reasons: string[] = [];
+      const handlers = new Map<string, Function>();
+      mockSocketOn.mockImplementation((event: string, cb: Function) => {
+        handlers.set(event, cb);
+        if (event === "connect") setTimeout(() => cb(), 0);
+      });
+
+      await client.connect({ onDisconnect: (reason) => reasons.push(reason) });
+
+      handlers.get("disconnect")!("io server disconnect");
+      expect(reasons).toEqual(["io server disconnect"]);
+    });
+
+    it("sendSocketMessage omits replyToId when not provided", async () => {
+      const client = makeClient();
+      mockLoginForSocket();
+
+      mockSocketOn.mockImplementation((event: string, cb: Function) => {
+        if (event === "connect") setTimeout(() => cb(), 0);
+      });
+      mockSocketConnected = true;
+
+      await client.connect();
+      client.sendSocketMessage("Hello!", "general");
+
+      expect(mockSocketEmit).toHaveBeenCalledWith("chat-message", {
+        content: "Hello!",
+        room: "general",
+      });
+    });
+
+    it("sendSocketMessage defaults room to 'general'", async () => {
+      const client = makeClient();
+      mockLoginForSocket();
+
+      mockSocketOn.mockImplementation((event: string, cb: Function) => {
+        if (event === "connect") setTimeout(() => cb(), 0);
+      });
+      mockSocketConnected = true;
+
+      await client.connect();
+      client.sendSocketMessage("Hello!");
+
+      expect(mockSocketEmit).toHaveBeenCalledWith("chat-message", {
+        content: "Hello!",
+        room: "general",
+      });
+    });
+
+    it("sendChatMessage via socket returns correct ChatMessage shape", async () => {
+      const client = makeClient();
+      mockLoginForSocket();
+
+      mockSocketOn.mockImplementation((event: string, cb: Function) => {
+        if (event === "connect") setTimeout(() => cb(), 0);
+      });
+      mockSocketConnected = true;
+
+      await client.connect();
+      const result = await client.sendChatMessage("test msg", "tech", 99);
+
+      expect(result.content).toBe("test msg");
+      expect(result.room).toBe("tech");
+      expect(result.replyToId).toBe(99);
+      expect(result.user.name).toBe("TestAgent");
+      expect(result.user.username).toBe("testagent");
+      expect(result.user.isBot).toBe(true);
+      expect(result.createdAt).toBeTruthy();
+    });
+
+    it("sendChatMessage via socket with no replyToId sets null", async () => {
+      const client = makeClient();
+      mockLoginForSocket();
+
+      mockSocketOn.mockImplementation((event: string, cb: Function) => {
+        if (event === "connect") setTimeout(() => cb(), 0);
+      });
+      mockSocketConnected = true;
+
+      await client.connect();
+      const result = await client.sendChatMessage("test");
+
+      expect(result.replyToId).toBeNull();
+      expect(result.room).toBe("general");
+    });
+  });
+
+  // ── getOnlineUsers ──
+
+  describe("getOnlineUsers", () => {
+    it("deduplicates users from recent messages", async () => {
+      const client = makeClient();
+      const messages = [
+        { id: 1, content: "hi", room: "general", userId: "u1", user: { name: "Alice", username: "alice", isBot: false }, replyToId: null, createdAt: "", replyTo: null },
+        { id: 2, content: "hello", room: "general", userId: "u2", user: { name: "Bob", username: "bob", isBot: true }, replyToId: null, createdAt: "", replyTo: null },
+        { id: 3, content: "again", room: "general", userId: "u1", user: { name: "Alice", username: "alice", isBot: false }, replyToId: null, createdAt: "", replyTo: null },
+      ];
+      mockLoginThenRequest(messages);
+
+      const users = await client.getOnlineUsers();
+
+      expect(users).toHaveLength(2);
+      expect(users[0].name).toBe("Alice");
+      expect(users[0].username).toBe("alice");
+      expect(users[1].name).toBe("Bob");
+      expect(users[1].isBot).toBe(true);
+    });
+
+    it("returns empty array when no messages", async () => {
+      const client = makeClient();
+      mockLoginThenRequest([]);
+
+      const users = await client.getOnlineUsers();
+      expect(users).toEqual([]);
+    });
+
+    it("passes room parameter to getChatMessages", async () => {
+      const client = makeClient();
+      mockLoginThenRequest([]);
+
+      await client.getOnlineUsers("tech");
+
+      const url = mockFetch.mock.calls[3][0];
+      expect(url).toContain("room=tech");
+    });
+  });
+
+  // ── Remaining API methods ──
+
+  describe("comments", () => {
+    it("getComments fetches by articleId", async () => {
+      const client = makeClient();
+      mockLoginThenRequest([{ id: 1, content: "nice" }]);
+
+      await client.getComments(42);
+
+      const url = mockFetch.mock.calls[3][0];
+      expect(url).toContain("/api/comments?articleId=42");
+    });
+
+    it("postComment without parentId omits it from body", async () => {
+      const client = makeClient();
+      mockLoginThenRequest({ id: 1, content: "Top comment", articleId: 10 }, 201);
+
+      await client.postComment(10, "Top comment");
+
+      const body = JSON.parse(mockFetch.mock.calls[3][1].body);
+      expect(body).toEqual({ articleId: 10, content: "Top comment" });
+      expect(body.parentId).toBeUndefined();
+    });
+  });
+
+  describe("ratings", () => {
+    it("getRatings fetches by articleId", async () => {
+      const client = makeClient();
+      mockLoginThenRequest({ average: 4.2, count: 50, userRating: null, userReview: null, distribution: {} });
+
+      const result = await client.getRatings(42);
+
+      const url = mockFetch.mock.calls[3][0];
+      expect(url).toContain("/api/ratings?articleId=42");
+      expect(result.average).toBe(4.2);
+    });
+  });
+
+  describe("agents / debates", () => {
+    it("getAgentProfile encodes username", async () => {
+      const client = makeClient();
+      mockLoginThenRequest({ agent: { id: "a1", name: "Test" }, stats: {} });
+
+      await client.getAgentProfile("tech hound");
+
+      const url = mockFetch.mock.calls[3][0];
+      expect(url).toContain("/api/agents/tech%20hound");
+    });
+
+    it("getTrendingDebates calls correct endpoint", async () => {
+      const client = makeClient();
+      mockLoginThenRequest([]);
+
+      await client.getTrendingDebates();
+
+      const url = mockFetch.mock.calls[3][0];
+      expect(url).toContain("/api/trending-debates");
+    });
+
+    it("getArticleOfHour calls correct endpoint", async () => {
+      const client = makeClient();
+      mockLoginThenRequest(null);
+
+      await client.getArticleOfHour();
+
+      const url = mockFetch.mock.calls[3][0];
+      expect(url).toContain("/api/article-of-hour");
+    });
+  });
+
+  // ── Constructor / config ──
+
+  describe("constructor", () => {
+    it("strips trailing slash from baseUrl", async () => {
+      const client = makeClient({ baseUrl: "https://example.com/newsv2/" });
+      mockLoginThenRequest([]);
+
+      await client.getChatMessages();
+
+      const url = mockFetch.mock.calls[3][0];
+      expect(url).toContain("https://example.com/newsv2/api/chat");
+      expect(url).not.toContain("newsv2//api");
+    });
+
+    it("defaults name to email prefix when not provided", async () => {
+      const client = new NoFOMOClient({
+        baseUrl: "https://example.com/newsv2",
+        email: "agent007@nofomo.dev",
+        password: "pass",
+      });
+      // Register to see the name
+      mockFetch
+        .mockResolvedValueOnce(cookieResponse({ csrfToken: "t1" }, "c=t1"))
+        .mockResolvedValueOnce(cookieResponse({}, "", 401))
+        .mockResolvedValueOnce(jsonResponse({}))
+        .mockResolvedValueOnce(jsonResponse({ ok: true }, 201))
+        .mockResolvedValueOnce(cookieResponse({ csrfToken: "t2" }, "c=t2"))
+        .mockResolvedValueOnce(cookieResponse({ url: "/" }, "s=s2", 200))
+        .mockResolvedValueOnce(jsonResponse({ user: { id: "u1" } }))
+        .mockResolvedValueOnce(jsonResponse([]));
+
+      await client.getChatMessages();
+
+      const registerCall = mockFetch.mock.calls[3];
+      const body = JSON.parse(registerCall[1].body);
+      expect(body.name).toBe("agent007");
+    });
+  });
+
+  // ── Chat edge cases ──
+
+  describe("chat edge cases", () => {
+    it("sendChatMessage via HTTP without optional params", async () => {
+      const client = makeClient();
+      mockLoginThenRequest({ id: 1, content: "hello", room: "general" }, 201);
+
+      await client.sendChatMessage("hello");
+
+      const body = JSON.parse(mockFetch.mock.calls[3][1].body);
+      expect(body).toEqual({ content: "hello" });
+      expect(body.room).toBeUndefined();
+      expect(body.replyToId).toBeUndefined();
+    });
+
+    it("getChatMessages without params sends no query string", async () => {
+      const client = makeClient();
+      mockLoginThenRequest([]);
+
+      await client.getChatMessages();
+
+      const url = mockFetch.mock.calls[3][0];
+      expect(url).toBe("https://ad-lux.com/newsv2/api/chat");
+      expect(url).not.toContain("?");
+    });
+
+    it("getArticles without params sends no query string", async () => {
+      const client = makeClient();
+      mockLoginThenRequest({ articles: [], total: 0, page: 1, totalPages: 0, hasMore: false });
+
+      await client.getArticles();
+
+      const url = mockFetch.mock.calls[3][0];
+      expect(url).toBe("https://ad-lux.com/newsv2/api/articles");
+    });
+  });
+
+  // ── Auth edge cases ──
+
+  describe("auth edge cases", () => {
+    it("throws when login and registration both fail", async () => {
+      const client = makeClient();
+      mockFetch
+        // 1st login: csrf
+        .mockResolvedValueOnce(cookieResponse({ csrfToken: "tok1" }, "csrf=tok1"))
+        // 1st login: credentials → fail
+        .mockResolvedValueOnce(cookieResponse({}, "", 200))
+        // 1st login: session → no user
+        .mockResolvedValueOnce(jsonResponse({}))
+        // Register → fail
+        .mockResolvedValueOnce(jsonResponse({ error: "server error" }, 500))
+        // 2nd login: csrf
+        .mockResolvedValueOnce(cookieResponse({ csrfToken: "tok2" }, "csrf=tok2"))
+        // 2nd login: credentials → fail
+        .mockResolvedValueOnce(cookieResponse({}, "", 200))
+        // 2nd login: session → still no user
+        .mockResolvedValueOnce(jsonResponse({}));
+
+      await expect(client.getChatMessages()).rejects.toThrow("Login failed");
+    });
+
+    it("register sends isBot:true and optional username/image", async () => {
+      const client = new NoFOMOClient({
+        baseUrl: "https://ad-lux.com/newsv2",
+        email: "bot@test.com",
+        password: "pass123",
+        name: "MyBot",
+        username: "mybot",
+        image: "https://example.com/avatar.png",
+      });
+
+      mockFetch
+        // 1st login: csrf
+        .mockResolvedValueOnce(cookieResponse({ csrfToken: "t" }, "c=t"))
+        // 1st login: credentials → fail (no user)
+        .mockResolvedValueOnce(cookieResponse({}, "", 200))
+        .mockResolvedValueOnce(jsonResponse({}))
+        // Register
+        .mockResolvedValueOnce(jsonResponse({ ok: true }, 201))
+        // 2nd login
+        .mockResolvedValueOnce(cookieResponse({ csrfToken: "t2" }, "c=t2"))
+        .mockResolvedValueOnce(cookieResponse({ url: "/" }, "s=s", 200))
+        .mockResolvedValueOnce(jsonResponse({ user: { id: "u1" } }))
+        .mockResolvedValueOnce(jsonResponse([]));
+
+      await client.getChatMessages();
+
+      const registerBody = JSON.parse(mockFetch.mock.calls[3][1].body);
+      expect(registerBody.isBot).toBe(true);
+      expect(registerBody.username).toBe("mybot");
+      expect(registerBody.image).toBe("https://example.com/avatar.png");
+      expect(registerBody.name).toBe("MyBot");
+    });
   });
 });
