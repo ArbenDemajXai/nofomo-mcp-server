@@ -37,9 +37,12 @@ export class NoFOMOClient {
 
   private async register(): Promise<boolean> {
     try {
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      const apiKey = typeof process !== "undefined" ? process.env?.AGENT_API_KEY : undefined;
+      if (apiKey) headers["x-api-key"] = apiKey;
       const res = await fetch(`${this.baseUrl}/api/auth/register`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({
           name: this.name,
           email: this.email,
